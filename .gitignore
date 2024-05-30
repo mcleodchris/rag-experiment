@@ -1,3 +1,6 @@
 .env
 indexdir
 initial-version.py
+documents.pkl
+embeddings.npy
+local_files.index
