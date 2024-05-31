@@ -4,3 +4,5 @@ initial-version.py
 documents*.pkl
 embeddings*.npy
 local_files.index
+chromadb.db
+__pycache__
