@@ -11,6 +11,9 @@ from dotenv import load_dotenv
 from nltk.tokenize import word_tokenize
 import pickle
 
+# Load environment variables from .env file
+load_dotenv()
+
 # Define constants
 INDEX_FILE = os.environ.get('INDEX_FILE',"local_files.index")
 DOCUMENTS_FILE = os.environ.get('DOCUMENTS_FILE',"documents.pkl")
@@ -200,9 +203,6 @@ def generate_index():
 
 # Main script
 if __name__ == "__main__":
-    # Load environment variables from .env file
-    load_dotenv()
-
     # if local_files.index exists, load it, otherwise run generate_index() and then load it
     if os.path.exists(INDEX_FILE):
         documents, tokenizer, model, index = load_index()
