@@ -29,61 +29,13 @@ from util import (
 
 """
 
-# Load environment variables from .env file
-load_dotenv()
-
-DOCUMENTS_FILE = os.environ.get("DOCUMENTS_FILE", "documents2.pkl")
-EMBEDDINGS_FILE = os.environ.get("EMBEDDINGS_FILE", "embeddings2.npy")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "phi3:mini")
-EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "mxbai-embed-large")
-LOCAL_DOCUMENTS = os.environ.get("DOCS_LOCATION", "./docs/**/*.txt")
-OPENAI_API_BASE = os.environ.get("OPENAI_BASE_URL", "http://localhost:11434/v1")
-CHROMADB_FILE = os.environ.get("CHROMADB_FILE", "chromadb.db")
-RELEVANT_RESULTS = int(os.environ.get("RELEVANT_RESULTS", 3))
-
-print(" ::: Environment :::")
-print(f"DOCUMENTS_FILE: {DOCUMENTS_FILE}")
-print(f"EMBEDDINGS_FILE: {EMBEDDINGS_FILE}")
-print(f"OLLAMA_MODEL: {OLLAMA_MODEL}")
-print(f"EMBEDDING_MODEL: {EMBEDDING_MODEL}")
-print(f"LOCAL_DOCUMENTS: {LOCAL_DOCUMENTS}")
-print(f"OPENAI_API_BASE: {OPENAI_API_BASE}")
-print(f"CHROMADB_FILE: {CHROMADB_FILE}")
-print(f"RELEVANT_RESULTS: {RELEVANT_RESULTS}")
-
-api = OpenAI(base_url=OPENAI_API_BASE, api_key=OLLAMA_MODEL)
-db, collection = None, None
-
 
 def chunk_text(text):
-    """
-    Split a given text into chunks by sentences, respecting a maximum chunk size.
-
-    Args:
-        text (str): The input text to be chunked.
-
-    Returns:
-        list: A list of chunks, where each chunk is a string of sentences separated by two newlines.
-    """
-    # Normalize whitespace and clean up text
-    text = re.sub(r"\s+", " ", text).strip()
-    # Split text into chunks by sentences, respecting a maximum chunk size
-    sentences = re.split(
-        r"(?<=[.!?]) +", text
-    )  # split on spaces following sentence-ending punctuation
-    chunks = []
-    current_chunk = ""
-    for sentence in sentences:
-        # Check if the current sentence plus the current chunk exceeds the limit
-        if len(current_chunk) + len(sentence) + 1 < 1000:  # +1 for the space
-            current_chunk += (sentence + " ").strip()
-        else:
-            # When the chunk exceeds 1000 characters, store it and start a new one
-            chunks.append(current_chunk)
-            current_chunk = sentence + " "
-    if current_chunk:  # Don't forget the last chunk!
-        chunks.append(current_chunk)
-    return chunks
+    # remove any YAML front-matter from the text
+    text = re.sub(r"---\n.*\n---\n", "", text)
+    # split the text into paragraphs
+    paragraphs = re.split(r"\n\n+", text)
+    return paragraphs
 
 
 def generate_documents():
@@ -109,9 +61,7 @@ def generate_documents():
         try:
             text = extract_text(file_path)
             if text:
-                chunks = chunk_text(text)
-                # append all chunks to documents
-                documents.extend(chunks)
+                documents.extend(chunk_text(text))
         except ValueError as e:
             print(e)
     print(f"Processed {len(documents)} document fragments.")
@@ -120,7 +70,7 @@ def generate_documents():
     return documents
 
 
-def generate_embeddings_chromadb(documents, collection):
+def generate_embeddings_chromadb(documents, collection, embedding_model):
     """
     Generate embeddings for a list of documents and store them in a vector embedding database.
 
@@ -131,17 +81,23 @@ def generate_embeddings_chromadb(documents, collection):
     Returns:
         None
     """
-    start_time = time.time()
-    for i, d in enumerate(documents):
-        response = ollama.embeddings(model=EMBEDDING_MODEL, prompt=d)
-        embedding = response["embedding"]
-        collection.add(ids=[str(i)], embeddings=[embedding], documents=[d])
-    end_time = time.time()
-    elapsed_time = format_elapsed_time((end_time - start_time))
-    print(f"Embeddings generated in {elapsed_time}.")
+    if collection.count() == 0:
+        print(
+            "Generating embeddings... please be patient, as it can take a long time..."
+        )
+        start_time = time.time()
+        for i, d in enumerate(documents):
+            response = ollama.embeddings(model=embedding_model, prompt=d)
+            embedding = response["embedding"]
+            collection.add(ids=[str(i)], embeddings=[embedding], documents=[d])
+        end_time = time.time()
+        elapsed_time = format_elapsed_time((end_time - start_time))
+        print(f"Embeddings generated in {elapsed_time}.")
+    else:
+        print("Embeddings already exist in the database.")
 
 
-def get_relevant_context_chromadb(query, collection):
+def get_relevant_context_chromadb(query, collection, embedding_model, top_k=3):
     """
     Retrieves the most relevant document from a collection based on a query.
 
@@ -153,14 +109,24 @@ def get_relevant_context_chromadb(query, collection):
         list: A list of the most relevant documents retrieved from the collection.
     """
     # generate an embedding for the prompt and retrieve the most relevant doc
-    response = ollama.embeddings(prompt=query, model=EMBEDDING_MODEL)
+    response = ollama.embeddings(prompt=query, model=embedding_model)
     results = collection.query(
-        query_embeddings=[response["embedding"]], n_results=RELEVANT_RESULTS
-    )
-    return [result["documents"][0] for result in results]
+        query_embeddings=[response["embedding"]], n_results=top_k
+    )["documents"][0]
+    # dump the results structure to the console
+
+    return results
 
 
-def generate_answer(user_input, conversation_history, system_message, collection):
+def generate_answer(
+    user_input,
+    conversation_history,
+    system_message,
+    collection,
+    embedding_model,
+    ollama_model,
+    relevant_results=3,
+):
     """
     Generates an answer based on the user input, conversation history, system message, and collection.
 
@@ -187,7 +153,9 @@ def generate_answer(user_input, conversation_history, system_message, collection
     else:
         rewritten_query = user_input
 
-    relevant_context = get_relevant_context_chromadb(rewritten_query, collection)
+    relevant_context = get_relevant_context_chromadb(
+        rewritten_query, collection, embedding_model, relevant_results
+    )
     context_str = ""
     if relevant_context:
         context_str = "\n".join(relevant_context)
@@ -209,7 +177,7 @@ def generate_answer(user_input, conversation_history, system_message, collection
     messages = [{"role": "system", "content": system_message}, *conversation_history]
 
     response = api.chat.completions.create(
-        model=OLLAMA_MODEL,
+        model=ollama_model,
         messages=messages,
         max_tokens=2000,
     )
@@ -217,12 +185,41 @@ def generate_answer(user_input, conversation_history, system_message, collection
     conversation_history.append(
         {"role": "assistant", "content": response.choices[0].message.content}
     )
+    # total_duration_ns = response.choices[0].total_duration
+    # # print the total duration formatted with format_elapsed_time
+    # print(
+    #     ansi.GREEN
+    #     + "Total duration: "
+    #     + format_elapsed_time(total_duration_ns / 1_000_000_000)
+    #     + ansi.RESET_COLOR
+    # )
 
     return response.choices[0].message.content
 
 
 # Main script
 if __name__ == "__main__":
+
+    # Load environment variables from .env file
+    load_dotenv(override=True)
+
+    DOCUMENTS_FILE = os.environ.get("DOCUMENTS_FILE", "documents2.pkl")
+    EMBEDDINGS_FILE = os.environ.get("EMBEDDINGS_FILE", "embeddings2.npy")
+    OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "phi3:mini")
+    EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "mxbai-embed-large")
+    LOCAL_DOCUMENTS = os.environ.get("DOCS_LOCATION", "./docs/**/*.txt")
+    OPENAI_API_BASE = os.environ.get("OPENAI_BASE_URL", "http://localhost:11434/v1")
+    CHROMADB_FILE = os.environ.get("CHROMADB_FILE", "chromadb.db")
+    RELEVANT_RESULTS = int(os.environ.get("RELEVANT_RESULTS", 3))
+
+    print(" ::: Environment :::")
+    print(f"DOCUMENTS_FILE: {DOCUMENTS_FILE}")
+    print(f"OLLAMA_MODEL: {OLLAMA_MODEL}")
+    print(f"EMBEDDING_MODEL: {EMBEDDING_MODEL}")
+    print(f"LOCAL_DOCUMENTS: {LOCAL_DOCUMENTS}")
+    print(f"OPENAI_API_BASE: {OPENAI_API_BASE}")
+    print(f"CHROMADB_FILE: {CHROMADB_FILE}")
+    print(f"RELEVANT_RESULTS: {RELEVANT_RESULTS}")
 
     parser = argparse.ArgumentParser(description="Local RAG Experiment")
     parser.add_argument(
@@ -241,6 +238,8 @@ if __name__ == "__main__":
         if os.path.exists(DOCUMENTS_FILE):
             os.remove(DOCUMENTS_FILE)
 
+    api = OpenAI(base_url=OPENAI_API_BASE, api_key=OLLAMA_MODEL)
+
     db, collection = get_database(CHROMADB_FILE)
 
     print("Getting documents...")
@@ -254,7 +253,7 @@ if __name__ == "__main__":
     # print("Embeddings for each document fragment:")
     # print(embeddings_tensor)
 
-    generate_embeddings_chromadb(documents, collection)
+    generate_embeddings_chromadb(documents, collection, EMBEDDING_MODEL)
 
     system_message = """
 You are a helpful assistant for question-answering tasks for a single user. Use the supplied context to answer the question. All the context is relevant to the user's interests and work. Use the context to answer the question as best as you can.
@@ -275,7 +274,13 @@ If you do know the answer, keep the answer concise. Bullet points and numbered l
             # Retrieve and print the answer
             # answer = ollama_chat(query, system_message, embeddings_tensor, documents, OLLAMA_MODEL, conversation_history)
             answer = generate_answer(
-                query, conversation_history, system_message, collectioni
+                query,
+                conversation_history,
+                system_message,
+                collection,
+                EMBEDDING_MODEL,
+                OLLAMA_MODEL,
+                RELEVANT_RESULTS,
             )
             if answer is not None:
                 print(answer)

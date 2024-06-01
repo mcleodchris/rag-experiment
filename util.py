@@ -182,5 +182,5 @@ def rewrite_query(user_input_json, conversation_history, client, ollama_model):
 
 def get_database(db_file):
     db = chromadb.PersistentClient(path=db_file)
-    collection = db.create_collection(name="docs")
+    collection = db.get_or_create_collection(name="docs")
     return db, collection
